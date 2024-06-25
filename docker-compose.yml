@@ -1,0 +1,18 @@
+services:
+  ggml_webgpu_dev:
+    container_name: ggml_webgpu_dev
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM emscripten/emsdk:3.1.61
+        RUN apt update && apt install -y git
+    user: "1000:1000"
+    volumes:
+      - ./:/source:Z
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        cd /source
+        emcmake cmake -B build-web && cmake --build build-web -j4
