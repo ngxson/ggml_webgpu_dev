@@ -311,49 +311,6 @@ void GetResult(void * output) {
     tmpbuf.unmap();
 }
 
-/*
-void GetAdapter(ggml_wgpu_context * ctx, void (*callback)(wgpu::Adapter)) {
-    ctx->instance.requestAdapter(
-        nullptr,
-        // TODO(https://bugs.chromium.org/p/dawn/issues/detail?id=1892): Use
-        // wgpu::RequestAdapterStatus and wgpu::Adapter.
-        [](WGPURequestAdapterStatus status, WGPUAdapter cAdapter,
-            const char* message, void* userdata) {
-            if (message) {
-                printf("RequestAdapter: %s\n", message);
-            }
-            if (status != WGPURequestAdapterStatus_Success) {
-                exit(0);
-            }
-            wgpu::Adapter adapter = wgpu::Adapter::acquire(cAdapter);
-            reinterpret_cast<void (*)(wgpu::Adapter)>(userdata)(adapter);
-    }, reinterpret_cast<void*>(callback));
-
-    wgpu::RequestAdapterOptions opts;
-    ctx->instance.requestAdapter(opts);
-}
-
-void GetDevice(ggml_wgpu_context * ctx, void (*callback)(wgpu::Device)) {
-    ctx->adapter.RequestDevice(
-        nullptr,
-        // TODO(https://bugs.chromium.org/p/dawn/issues/detail?id=1892): Use
-        // wgpu::RequestDeviceStatus and wgpu::Device.
-        [](WGPURequestDeviceStatus status, WGPUDevice cDevice,
-            const char* message, void* userdata) {
-            if (message) {
-                printf("RequestDevice: %s\n", message);
-            }
-            wgpu::Device device = wgpu::Device::acquire(cDevice);
-            device.SetUncapturedErrorCallback(
-                [](WGPUErrorType type, const char* message, void* userdata) {
-                    std::cout << "Error: " << type << " - message: " << message;
-                },
-                nullptr);
-            reinterpret_cast<void (*)(wgpu::Device)>(userdata)(device);
-    }, reinterpret_cast<void*>(callback));
-}
-*/
-
 int main() {
     printf("Start\n");
     ctx = new ggml_wgpu_context;
