@@ -18,7 +18,9 @@ add_library(ggml OBJECT
             ggml-backend.c
             ggml-backend.h
             ggml-quants.c
-            ggml-quants.h)
+            ggml-quants.h
+            ggml-wgpu.cpp
+            ggml-wgpu.h)
 target_include_directories(ggml PUBLIC . ${LLAMA_EXTRA_INCLUDES})
 target_compile_features   (ggml PUBLIC c_std_11) # don't bump
 target_link_libraries(ggml PUBLIC Threads::Threads ${LLAMA_EXTRA_LIBS})
