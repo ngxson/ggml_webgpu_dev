@@ -24,9 +24,12 @@ target_compile_features   (ggml PUBLIC c_std_11) # don't bump
 target_link_libraries(ggml PUBLIC Threads::Threads ${LLAMA_EXTRA_LIBS})
 
 # app
-add_executable(app "main.cpp")
+add_executable(main "main.cpp")
+add_executable(demo "demo.cpp")
 add_library(ggml_static STATIC $<TARGET_OBJECTS:ggml>)
 
 #include_directories("${CMAKE_CURRENT_LIST_DIR}/includes")
-set_target_properties(app PROPERTIES SUFFIX ".html")
-target_link_options(app PRIVATE "-sUSE_WEBGPU=1" "-sUSE_GLFW=3")
+set_target_properties(main PROPERTIES SUFFIX ".html")
+set_target_properties(demo PROPERTIES SUFFIX ".html")
+target_link_options(main PRIVATE "-sUSE_WEBGPU=1" "-sUSE_GLFW=3" "-sALLOW_MEMORY_GROWTH=1" "-sASYNCIFY=1")
+target_link_options(demo PRIVATE "-sUSE_WEBGPU=1" "-sUSE_GLFW=3" "-sALLOW_MEMORY_GROWTH=1" "-sASYNCIFY=1")
