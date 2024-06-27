@@ -1,8 +1,6 @@
 #include <GLFW/glfw3.h>
 #include <iostream>
 #include <vector>
-#include <unordered_map>
-#include <set>
 #include <emscripten/emscripten.h>
 
 #define WEBGPU_CPP_IMPLEMENTATION
@@ -14,6 +12,7 @@
 #include "ggml-backend-impl.h"
 
 #define BUF_ALIGN 256
+#define BUF_BASE  0x1000
 #define UNUSED GGML_UNUSED
 
 #define LOGD(...) printf(__VA_ARGS__)
@@ -39,7 +38,6 @@ struct ggml_wgpu_context {
     bool                  buft_initialized = false;
     wgpu::Buffer          buf_tensor_params;
     ggml_wgpu_tensor_params tensor_params_host;
-    std::set<ggml_wgpu_buffer_context *> buffers;
 
     ggml_wgpu_context() {
         // instance = wgpu::createInstance(&instanceDesc);
@@ -161,7 +159,6 @@ using ggml_wgpu_buffer_type_context = ggml_wgpu_context;
 int buff_id = 0;
 struct ggml_wgpu_buffer_context {
     ggml_wgpu_context * ctx;
-    std::unordered_map<const ggml_tensor *, size_t> offset_table;
     wgpu::Buffer buffer;
     size_t       size;
     size_t       next_free_ptr = 0;
@@ -171,13 +168,11 @@ struct ggml_wgpu_buffer_context {
         label = std::string("storage_buffer_") + std::to_string(buff_id++);
         LOGD("%s: create with size=%ld\n", label.c_str(), size);
         init_buf();
-        ctx->buffers.insert(this);
     }
 
     ~ggml_wgpu_buffer_context() {
         LOGD("%s: free\n", label.c_str());
         buffer.unmap();
-        ctx->buffers.erase(this);
     }
 
     void init_buf() {
@@ -193,28 +188,16 @@ struct ggml_wgpu_buffer_context {
     }
     
     void init_tensor(const ggml_tensor * tensor) {
-        size_t padded_size = GGML_PAD(ggml_nbytes(tensor), BUF_ALIGN);
-        bool n_bytes_missing = next_free_ptr + padded_size - size;
-        if (n_bytes_missing > 0) {
-            // need realloc
-            LOGD("%s: realloc to size=%ld\n", label.c_str(), size);
-            buffer.unmap();
-            size = GGML_PAD(size + n_bytes_missing, BUF_ALIGN);
-            init_buf();
-        }
         LOGD("%s: %s, init to offset %ld\n", label.c_str(), tensor->name, next_free_ptr);
-        offset_table[tensor] = next_free_ptr;
-        next_free_ptr += padded_size;
     }
 
     void write_tensor(const ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-        size_t offs_in_buf = offset_table[tensor] + offset;
-        LOGD("%s: %s, write to offset %ld\n", label.c_str(), tensor->name, offs_in_buf);
+        size_t offs_in_buf = (size_t)tensor->data - BUF_BASE;
         ctx->queue.writeBuffer(buffer, offs_in_buf, data, size);
     }
 
     void read_tensor(const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
-        size_t offs_in_buf = offset_table[tensor] + offset;
+        size_t offs_in_buf = (size_t)tensor->data - BUF_BASE;
         LOGD("%s: %s, read from offset %ld\n", label.c_str(), tensor->name, offs_in_buf);
         wgpu::BufferDescriptor descBuf = wgpu::Default;
         {
@@ -255,28 +238,6 @@ struct ggml_wgpu_buffer_context {
     }
 };
 
-
-////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-// utils
-
-struct tensor_position {
-    wgpu::Buffer buffer;
-    size_t       offset;
-};
-
-tensor_position lookup_tensor(ggml_wgpu_context * ctx, const ggml_tensor * tensor) {
-    for (ggml_wgpu_buffer_context * buf_ctx : ctx->buffers) {
-        if (buf_ctx->offset_table.find(tensor) != buf_ctx->offset_table.end()) {
-            return {
-                .buffer = buf_ctx->buffer,
-                .offset = buf_ctx->offset_table[tensor],
-            };
-        }
-    }
-    return tensor_position{nullptr, 0};
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
 // backend buffer interface
@@ -295,7 +256,7 @@ static void ggml_backend_wgpu_buffer_free_buffer(ggml_backend_buffer_t buffer) {
 static void * ggml_backend_wgpu_buffer_get_base(ggml_backend_buffer_t buffer) {
     //return (void *)buffer->context;
     // the pointers are stored in the tensor extras, this is just a dummy address and never dereferenced
-    return (void *)0x1000;
+    return (void *)BUF_BASE;
 }
 
 
@@ -427,15 +388,18 @@ static void ggml_backend_wgpu_synchronize(ggml_backend_t backend) {
 
 bool ggml_wgpu_compute_forward(ggml_wgpu_context * ctx, struct ggml_tensor * tensor) {
     LOGD("%s: %s op=%s\n", __func__, tensor->name, ggml_op_name(tensor->op));
+
     wgpu::ComputePipeline compPipeline = ctx->pipeline_op[tensor->op];
+
     const ggml_tensor * src0 = tensor->src[0];
     const ggml_tensor * src1 = tensor->src[1];
-    tensor_position result = lookup_tensor(ctx, tensor);
-    tensor_position pos0   = lookup_tensor(ctx, src0);
-    tensor_position pos1   = lookup_tensor(ctx, src1);
-    LOGD("%s: result=%s off=%ld\n", __func__, tensor->name, result.offset);
-    LOGD("%s: src0=%s off=%ld\n", __func__, src0->name, pos0.offset);
-    LOGD("%s: src1=%s off=%ld\n", __func__, src1->name, pos1.offset);
+    auto get_wgpu_buffer = [](const ggml_tensor * t) {
+        ggml_backend_buffer_t buf = t->view_src ? t->view_src->buffer : t->buffer;
+        return ((ggml_wgpu_buffer_context *)buf->context)->buffer;
+    };
+    auto get_wgpu_offset = [](const ggml_tensor * t) {
+        return (size_t)t->data - BUF_BASE;
+    };
 
     // ctx->tensor_params_host
     ctx->queue.writeBuffer(ctx->buf_tensor_params, 0, &ctx->tensor_params_host, sizeof(ggml_wgpu_tensor_params));
@@ -444,24 +408,28 @@ bool ggml_wgpu_compute_forward(ggml_wgpu_context * ctx, struct ggml_tensor * ten
     wgpu::BindGroupEntry bgEntries[4];
     {
         bgEntries[0].binding = 0;
-        bgEntries[0].buffer = pos0.buffer;
-        bgEntries[0].offset = pos0.offset;
+        bgEntries[0].buffer = get_wgpu_buffer(src0);
+        bgEntries[0].offset = get_wgpu_offset(src0);
         bgEntries[0].size = GGML_PAD(ggml_nbytes(src0), BUF_ALIGN);
 
         bgEntries[1].binding = 1;
-        bgEntries[1].buffer = pos1.buffer;
-        bgEntries[1].offset = pos1.offset;
+        bgEntries[1].buffer = get_wgpu_buffer(src1);
+        bgEntries[1].offset = get_wgpu_offset(src1);
         bgEntries[1].size = GGML_PAD(ggml_nbytes(src1), BUF_ALIGN);
 
         bgEntries[2].binding = 2;
-        bgEntries[2].buffer = result.buffer;
-        bgEntries[2].offset = result.offset;
+        bgEntries[2].buffer = get_wgpu_buffer(tensor);
+        bgEntries[2].offset = get_wgpu_offset(tensor);
         bgEntries[2].size = GGML_PAD(ggml_nbytes(tensor), BUF_ALIGN);
 
         bgEntries[3].binding = 3;
         bgEntries[3].buffer = ctx->buf_tensor_params;
         bgEntries[3].offset = 0;
         bgEntries[3].size = sizeof(ggml_wgpu_tensor_params);
+
+        LOGD("%s: src0=%s off=%llu\n", __func__, src0->name, bgEntries[0].offset);
+        LOGD("%s: src1=%s off=%llu\n", __func__, src1->name, bgEntries[1].offset);
+        LOGD("%s: dest=%s off=%llu\n", __func__, tensor->name, bgEntries[2].offset);
     }
     wgpu::BindGroupDescriptor bgDesc = wgpu::Default;
     {
