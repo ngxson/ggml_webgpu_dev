@@ -1,173 +1,123 @@
-#include <GLFW/glfw3.h>
-#include <webgpu/webgpu_cpp.h>
-#include <iostream>
-#if defined(__EMSCRIPTEN__)
-#include <emscripten/emscripten.h>
-#else
-#include <webgpu/webgpu_glfw.h>
-#endif
+#include "ggml.h"
+#include "ggml-alloc.h"
+#include "ggml-backend.h"
+#include "ggml-wgpu.h"
 
-#define __EMSCRIPTEN__
+#include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <map>
+#include <string>
+#include <vector>
 
-wgpu::Instance instance;
-wgpu::Adapter adapter;
-wgpu::Device device;
-wgpu::RenderPipeline pipeline;
+// Based on:
+// https://github.com/ggerganov/ggml/blob/master/examples/simple/simple-backend.cpp
 
-wgpu::Surface surface;
-wgpu::TextureFormat format;
-const uint32_t kWidth = 512;
-const uint32_t kHeight = 512;
+const int rows_A = 4, cols_A = 2;
+const int rows_B = 4, cols_B = 2;
+float demo_mat_A[rows_A * cols_A] = {
+    2, 8,
+    -5, 1,
+    4, 2,
+    8, -6
+};
+float demo_mat_B[rows_B * cols_B] = {
+    1, 6,
+    3, -7,
+    9, 0.1,
+    -1, 5
+};
 
-void ConfigureSurface() {
-  wgpu::SurfaceCapabilities capabilities;
-  surface.GetCapabilities(adapter, &capabilities);
-  format = capabilities.formats[0];
+struct simple_model {
+    struct ggml_tensor * a;
+    struct ggml_tensor * b;
+    ggml_backend_t backend = NULL;
+    ggml_backend_buffer_t buffer;
+    struct ggml_context * ctx;
 
-  wgpu::SurfaceConfiguration config{
-      .device = device,
-      .format = format,
-      .width = kWidth,
-      .height = kHeight};
-  surface.Configure(&config);
-}
-
-void GetAdapter(void (*callback)(wgpu::Adapter)) {
-  instance.RequestAdapter(
-      nullptr,
-      // TODO(https://bugs.chromium.org/p/dawn/issues/detail?id=1892): Use
-      // wgpu::RequestAdapterStatus and wgpu::Adapter.
-      [](WGPURequestAdapterStatus status, WGPUAdapter cAdapter,
-         const char* message, void* userdata) {
-        if (message) {
-          printf("RequestAdapter: %s\n", message);
+    simple_model() {
+        printf("%s: using webgpu backend\n", __func__);
+        backend = ggml_backend_wgpu_init();
+        if (!backend) {
+            printf("%s: ggml_backend_wgpu_init() failed\n", __func__);
         }
-        if (status != WGPURequestAdapterStatus_Success) {
-          exit(0);
-        }
-        wgpu::Adapter adapter = wgpu::Adapter::Acquire(cAdapter);
-        reinterpret_cast<void (*)(wgpu::Adapter)>(userdata)(adapter);
-  }, reinterpret_cast<void*>(callback));
-}
 
-void GetDevice(void (*callback)(wgpu::Device)) {
-  adapter.RequestDevice(
-      nullptr,
-      // TODO(https://bugs.chromium.org/p/dawn/issues/detail?id=1892): Use
-      // wgpu::RequestDeviceStatus and wgpu::Device.
-      [](WGPURequestDeviceStatus status, WGPUDevice cDevice,
-          const char* message, void* userdata) {
-        if (message) {
-          printf("RequestDevice: %s\n", message);
-        }
-        wgpu::Device device = wgpu::Device::Acquire(cDevice);
-        device.SetUncapturedErrorCallback(
-            [](WGPUErrorType type, const char* message, void* userdata) {
-              std::cout << "Error: " << type << " - message: " << message;
-            },
-            nullptr);
-        reinterpret_cast<void (*)(wgpu::Device)>(userdata)(device);
-  }, reinterpret_cast<void*>(callback));
-}
+        struct ggml_init_params params {
+            /*.mem_size   =*/ ggml_tensor_overhead() * 128,
+            /*.mem_buffer =*/ NULL,
+            /*.no_alloc   =*/ true,
+        };
+        ctx = ggml_init(params);
 
-const char shaderCode[] = R"(
-    @vertex fn vertexMain(@builtin(vertex_index) i : u32) ->
-      @builtin(position) vec4f {
-        const pos = array(vec2f(0, 1), vec2f(-1, -1), vec2f(1, -1));
-        return vec4f(pos[i], 0, 1);
+        a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_A, rows_A);
+        b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_B, rows_B);
+        ggml_set_name(a, "tensor_a");
+        ggml_set_name(b, "tensor_b");
+
+        for (int i = 0; i < 64; i++) {
+            auto t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_B, rows_B);
+            ggml_format_name(t, "test_%d", i);
+        }
+
+        buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+        ggml_backend_tensor_set(a, demo_mat_A, 0, ggml_nbytes(a));
+        ggml_backend_tensor_set(b, demo_mat_B, 0, ggml_nbytes(b));
     }
-    @fragment fn fragmentMain() -> @location(0) vec4f {
-        return vec4f(1, 0, 0, 1);
-    }
-)";
+};
 
-void CreateRenderPipeline() {
-  wgpu::ShaderModuleWGSLDescriptor wgslDesc{};
-  wgslDesc.code = shaderCode;
-
-  wgpu::ShaderModuleDescriptor shaderModuleDescriptor{
-      .nextInChain = &wgslDesc};
-  wgpu::ShaderModule shaderModule =
-      device.CreateShaderModule(&shaderModuleDescriptor);
-
-  wgpu::ColorTargetState colorTargetState{.format = format};
-
-  wgpu::FragmentState fragmentState{.module = shaderModule,
-                                    .targetCount = 1,
-                                    .targets = &colorTargetState};
-
-  wgpu::RenderPipelineDescriptor descriptor{
-      .vertex = {.module = shaderModule},
-      .fragment = &fragmentState};
-  pipeline = device.CreateRenderPipeline(&descriptor);
+struct ggml_cgraph * build_graph(const simple_model & model) {
+    static size_t buf_size = ggml_tensor_overhead()*GGML_DEFAULT_GRAPH_SIZE + ggml_graph_overhead();
+    static std::vector<uint8_t> buf(buf_size);
+    struct ggml_init_params params0 = {
+        /*.mem_size   =*/ buf_size,
+        /*.mem_buffer =*/ buf.data(),
+        /*.no_alloc   =*/ true, // the tensors will be allocated later by ggml_allocr_alloc_graph()
+    };
+    struct ggml_context * ctx0 = ggml_init(params0);
+    struct ggml_cgraph  * gf = ggml_new_graph(ctx0);
+    struct ggml_tensor * result = ggml_add(ctx0, model.a, model.b);
+    result = ggml_div(ctx0, result, model.b);
+    result = ggml_div(ctx0, result, model.b);
+    result = ggml_div(ctx0, result, model.b);
+    result = ggml_div(ctx0, result, model.b);
+    ggml_build_forward_expand(gf, result);
+    ggml_free(ctx0);
+    return gf;
 }
 
-void Render() {
-  wgpu::SurfaceTexture surfaceTexture;
-  surface.GetCurrentTexture(&surfaceTexture);
-
-  wgpu::RenderPassColorAttachment attachment{
-      .view = surfaceTexture.texture.CreateView(),
-      .loadOp = wgpu::LoadOp::Clear,
-      .storeOp = wgpu::StoreOp::Store};
-
-  wgpu::RenderPassDescriptor renderpass{.colorAttachmentCount = 1,
-                                        .colorAttachments = &attachment};
-
-  wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
-  wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderpass);
-  pass.SetPipeline(pipeline);
-  pass.Draw(3);
-  pass.End();
-  wgpu::CommandBuffer commands = encoder.Finish();
-  device.GetQueue().Submit(1, &commands);
-}
-
-void InitGraphics() {
-  ConfigureSurface();
-  CreateRenderPipeline();
-}
-
-void Start() {
-  if (!glfwInit()) {
-    return;
-  }
-
-  glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-  GLFWwindow* window =
-      glfwCreateWindow(kWidth, kHeight, "WebGPU window", nullptr, nullptr);
-
-#if defined(__EMSCRIPTEN__)
-  wgpu::SurfaceDescriptorFromCanvasHTMLSelector canvasDesc{};
-  canvasDesc.selector = "#canvas";
-
-  wgpu::SurfaceDescriptor surfaceDesc{.nextInChain = &canvasDesc};
-  surface = instance.CreateSurface(&surfaceDesc);
-#else
-  surface = wgpu::glfw::CreateSurfaceForWindow(instance, window);
-#endif
-
-  InitGraphics();
-
-#if defined(__EMSCRIPTEN__)
-  emscripten_set_main_loop(Render, 0, false);
-#else
-  while (!glfwWindowShouldClose(window)) {
-    glfwPollEvents();
-    Render();
-    surface.Present();
-    instance.ProcessEvents();
-  }
-#endif
+struct ggml_tensor * compute(const simple_model & model, ggml_gallocr_t allocr) {
+    struct ggml_cgraph * gf = build_graph(model);
+    ggml_gallocr_alloc_graph(allocr, gf);
+    ggml_backend_graph_compute(model.backend, gf);
+    return gf->nodes[gf->n_nodes - 1];
 }
 
 int main() {
-  instance = wgpu::CreateInstance();
-  GetAdapter([](wgpu::Adapter a) {
-    adapter = a;
-    GetDevice([](wgpu::Device d) {
-      device = d;
-      Start();
-    });
-  });
+    ggml_time_init();
+    simple_model model;
+
+    ggml_gallocr_t allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
+    struct ggml_tensor * result = compute(model, allocr);
+
+    // get result
+    std::vector<float> out_data(ggml_nelements(result));
+
+    // bring the data from the backend memory
+    ggml_backend_tensor_get(result, out_data.data(), 0, ggml_nbytes(result));
+    printf("output (%d x %d):\n[\n", (int) result->ne[0], (int) result->ne[1]);
+    for (int i = 0; i < result->ne[1] /* cols */; i++) {
+        for (int j = 0; j < result->ne[0] /* rows */; j++) {
+            printf(" %.2f", out_data[i * result->ne[0] + j]);
+        }
+        printf("\n");
+    }
+    printf("]\n");
+
+    ggml_gallocr_free(allocr);
+    ggml_free(model.ctx);
+    ggml_backend_buffer_free(model.buffer);
+    ggml_backend_free(model.backend);
+    return 0;
 }

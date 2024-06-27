@@ -20,7 +20,8 @@ add_library(ggml OBJECT
             ggml-quants.c
             ggml-quants.h
             ggml-wgpu.cpp
-            ggml-wgpu.h)
+            ggml-wgpu.h
+            ggml-wgpu/wgpu-shaders.cpp)
 target_include_directories(ggml PUBLIC . ${LLAMA_EXTRA_INCLUDES})
 target_compile_features   (ggml PUBLIC c_std_11) # don't bump
 target_link_libraries(ggml PUBLIC Threads::Threads ${LLAMA_EXTRA_LIBS})
@@ -28,7 +29,9 @@ target_link_libraries(ggml PUBLIC Threads::Threads ${LLAMA_EXTRA_LIBS})
 # app
 add_executable(main "main.cpp")
 add_executable(demo "demo.cpp")
-add_library(ggml_static STATIC $<TARGET_OBJECTS:ggml>)
+target_link_libraries(main PRIVATE ggml)
+
+#add_library(ggml_static STATIC $<TARGET_OBJECTS:ggml>)
 
 #include_directories("${CMAKE_CURRENT_LIST_DIR}/includes")
 set_target_properties(main PROPERTIES SUFFIX ".html")
